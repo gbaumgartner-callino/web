@@ -4,6 +4,7 @@
         <div class = "cc">
             <div class="signature oe_edit_only"/><br/>
             <button class="oe_form_binary_file_clear oe_edit_only clear_sign"><span>Clear</span></button>
+            <button class="oe_edit_only start_sign"><span>Sign</span></button>
             <span class="oe_edit_only save_sign"></span>
         </div>
     </t>

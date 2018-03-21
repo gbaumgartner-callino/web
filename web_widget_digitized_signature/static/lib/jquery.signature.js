@@ -1,185 +1,515 @@
-(function ($) { // Hide scope, no $ conflict
+/*! http://keith-wood.name/signature.html
+	Signature plugin for jQuery UI v1.2.0.
+	Requires excanvas.js in IE.
+	Written by Keith Wood (wood.keith{at}optusnet.com.au) April 2012.
+	Available under the MIT (http://keith-wood.name/licence.html) license.
+	Please attribute the author if you use it. */
 
-    var signatureOverrides = {
+/* globals G_vmlCanvasManager */
 
-        // Global defaults for signature
-        options: {
-            background: '#ffffff', // Colour of the background
-            color: '#000000', // Colour of the signature
-            thickness: 2, // Thickness of the lines
-            guideline: false, // Add a guide line or not?
-            guidelineColor: '#a0a0a0', // Guide line colour
-            guidelineOffset: 50, // Guide line offset from the bottom
-            guidelineIndent: 10, // Guide line indent from the edges
-            notAvailable: 'Your browser doesn\'t support signing', // Error message when no canvas
-            syncField: null, // Selector for synchronised text field
-            change: null, // Callback when signature changed
-            width: 170,
-            height: 50
-        },
+(function($) { // Hide scope, no $ conflict
+	'use strict';
 
-        /* Initialise a new signature area. */
-        _create: function () {
+	/** Signature capture and display.
+		<p>Depends on <code>jquery.ui.widget</code>, <code>jquery.ui.mouse</code>.</p>
+		<p>Expects HTML like:</p>
+		<pre>&lt;div>&lt;/div></pre>
+		@namespace Signature
+		@augments $.Widget
+		@example $(selector).signature()
+$(selector).signature({color: 'blue', guideline: true}) */
+	var signatureOverrides = {
 
+		/** Be notified when a signature changes.
+			@callback SignatureChange
+			@global
+			@this Signature
+			@example change: function() {
+  console.log('Signature changed');
+} */
 
-            this.element.addClass(this.widgetFullName || this.widgetBaseClass);
-            try {
-                this.canvas = $('<canvas width="' + this.options.width + '" height="' +
-                    this.options.height + '">' + '' + '</canvas>')[0];
-                // to reference "this" in one of the event listeners we have to store "this" into a different variable,
-			// because the "this" inside the anonymous function wouldn't be the same.
-			var myself = this;
-			this.canvas.addEventListener("touchstart", function (event) {
-				// somehow the first attempt to create a mouse event and dispatch it didn't end up in _mouse(Start|Drag|Stop),
-				// so this code here is the same as in these functions but uses the touch coordinates
-				var touch = event.touches[0];
-				myself.offset = myself.element.offset();
-				myself.offset.left -= document.documentElement.scrollLeft || document.body.scrollLeft;
-				myself.offset.top -= document.documentElement.scrollTop || document.body.scrollTop;
-				myself.lastPoint = [myself._round(touch.clientX - myself.offset.left),
-					myself._round(touch.clientY - myself.offset.top)];
-				myself.curLine = [myself.lastPoint];
-				myself.lines.push(myself.curLine);
-			}, false);
+		/** Global defaults for signature.
+			@memberof Signature
+			@property {number} [distance=0] The minimum distance to start a drag.
+			@property {string} [background='#fff'] The background colour.
+			@property {string} [color='#000'] The colour of the signature.
+			@property {number} [thickness=2] The thickness of the lines.
+			@property {boolean} [guideline=false] <code>true</code> to add a guideline.
+			@property {string} [guidelineColor='#a0a0a0'] The guideline colour.
+			@property {number} [guidelineOffset=50] The guideline offset (pixels) from the bottom.
+			@property {number} [guidelineIndex=10] The guideline indent (pixels) from the edges.
+			@property {string} [notAvailable='Your browser doesn\'t support signing']
+								The error message to show when no canvas is available.
+			@property {string|Element|jQuery} [syncField=null] The selector, DOM element, or jQuery object
+								for a field to automatically synchronise with a text version of the signature.
+			@property {string} [syncFormat='JSON'] The output representation: 'JSON', 'SVG', 'PNG', 'JPEG'.
+			@property {boolean} [svgStyles=false] <code>true</code> to use the <code>style</code> attribute in SVG.
+			@property {SignatureChange} [change=null] A callback triggered when the signature changes.
+			@example $.extend($.kbw.signature.options, {guideline: true}) */
+		options: {
+			distance: 0,
+			background: '#fff',
+			color: '#000',
+			thickness: 2,
+			guideline: false,
+			guidelineColor: '#a0a0a0',
+			guidelineOffset: 50,
+			guidelineIndent: 10,
+			notAvailable: 'Your browser doesn\'t support signing',
+			syncField: null,
+			syncFormat: 'JSON',
+			svgStyles: false,
+			change: null,
+            signotecWSUri: "wss://local.signotecwebsocket.de:49494",
+			signotecEnabled: true,
+		},
 
-			this.canvas.addEventListener("touchend", function(event) {
-				myself.lastPoint = null;
-				myself.curLine = null;
-				myself._changed(event);
-			}, false);
+		/** Initialise a new signature area.
+			@memberof Signature
+			@private */
+		_create: function() {
+			this.element.addClass(this.widgetFullName || this.widgetBaseClass);
+			try {
+				this.canvas = $('<canvas width="' + this.element.width() + '" height="' +
+					this.element.height() + '">' + this.options.notAvailable + '</canvas>')[0];
+				this.element.append(this.canvas);
+			}
+			catch (e) {
+				$(this.canvas).remove();
+				this.resize = true;
+				this.canvas = document.createElement('canvas');
+				this.canvas.setAttribute('width', this.element.width());
+				this.canvas.setAttribute('height', this.element.height());
+				this.canvas.innerHTML = this.options.notAvailable;
+				this.element.append(this.canvas);
+				/* jshint -W106 */
+				if (G_vmlCanvasManager) { // Requires excanvas.js
+					G_vmlCanvasManager.initElement(this.canvas);
+				}
+				/* jshint +W106 */
+			}
+			this.ctx = this.canvas.getContext('2d');
+			this._refresh(true);
+			this._mouseInit();
+		},
 
-			this.canvas.addEventListener("touchmove", function(event) {
-				var touch = event.touches[0];
-				var point = [myself._round(touch.clientX - myself.offset.left),
-					myself._round(touch.clientY - myself.offset.top)];
-				myself.curLine.push(point);
-				myself.ctx.beginPath();
-				myself.ctx.moveTo(myself.lastPoint[0], myself.lastPoint[1]);
-				myself.ctx.lineTo(point[0], point[1]);
-				myself.ctx.stroke();
-				myself.lastPoint = point;
-			}, false);
+		/** Refresh the appearance of the signature area.
+			@memberof Signature
+			@private
+			@param {boolean} init <code>true</code> if initialising. */
+		_refresh: function(init) {
+			if (this.resize) {
+				var parent = $(this.canvas);
+				$('div', this.canvas).css({width: parent.width(), height: parent.height()});
+			}
+			this.ctx.fillStyle = this.options.background;
+			this.ctx.strokeStyle = this.options.color;
+			this.ctx.lineWidth = this.options.thickness;
+			this.ctx.lineCap = 'round';
+			this.ctx.lineJoin = 'round';
+			this.clear(init);
+		},
 
-			// Prevent scrolling when touching the canvas
-            document.body.addEventListener("touchstart", function (e) {
-              if (e.target == this.canvas) {
-                e.preventDefault();
-              }
-            }, false);
-            document.body.addEventListener("touchend", function (e) {
-              if (e.target == this.canvas) {
-                e.preventDefault();
-              }
-            }, false);
-            document.body.addEventListener("touchmove", function (e) {
-              if (e.target == this.canvas) {
-                e.preventDefault();
-              }
-            }, false);
-
-                this.element.prepend(this.canvas);
-                this.element.find('img').remove();
-                this.ctx = this.canvas.getContext('2d');
+		/** Clear the signature area.
+			@memberof Signature
+			@param {boolean} init <code>true</code> if initialising - internal use only.
+			@example $(selector).signature('clear') */
+		clear: function(init) {
+			if (this.options.disabled) {
+				return;
+			}
+			this.ctx.fillRect(0, 0, this.element.width(), this.element.height());
+			if (this.options.guideline) {
+				this.ctx.save();
+				this.ctx.strokeStyle = this.options.guidelineColor;
+				this.ctx.lineWidth = 1;
+				this.ctx.beginPath();
+				this.ctx.moveTo(this.options.guidelineIndent,
+					this.element.height() - this.options.guidelineOffset);
+				this.ctx.lineTo(this.element.width() - this.options.guidelineIndent,
+					this.element.height() - this.options.guidelineOffset);
+				this.ctx.stroke();
+				this.ctx.restore();
+			}
+			this.lines = [];
+			if (!init) {
+				this._changed();
+			}
+			if (this.signotecAvailable) {
+			    this._clear_signotec();
             }
-            catch (e) {
-                $(this.canvas).remove();
-                this.resize = true;
-                this.canvas = document.createElement('canvas');
-                this.canvas.setAttribute('width', this.element.width());
-                this.canvas.setAttribute('height', this.element.height());
-                this.canvas.innerHTML = this.options.notAvailable;
-                this.element.append(this.canvas);
-                if (G_vmlCanvasManager) { // Requires excanvas.js
-                    G_vmlCanvasManager.initElement(this.canvas);
+		},
+
+		/** Synchronise changes and trigger a change event.
+			@memberof Signature
+			@private
+			@param {Event} event The triggering event. */
+		_changed: function(event) {
+			if (this.options.syncField) {
+				var output = '';
+				switch (this.options.syncFormat) {
+					case 'PNG':
+						output = this.toDataURL();
+						break;
+					case 'JPEG':
+						output = this.toDataURL('image/jpeg');
+						break;
+					case 'SVG':
+						output = this.toSVG();
+						break;
+					default:
+						output = this.toJSON();
+				}
+				$(this.options.syncField).val(output);
+			}
+			this._trigger('change', event, {});
+		},
+
+		/** Refresh the signature when options change.
+			@memberof Signature
+			@private
+			@param {object} options The new option values. */
+		_setOptions: function(/* options */) {
+			if (this._superApply) {
+				this._superApply(arguments); // Base widget handling
+			}
+			else {
+				$.Widget.prototype._setOptions.apply(this, arguments); // Base widget handling
+			}
+			var count = 0;
+			var onlyDisable = true;
+			for (var name in arguments[0]) {
+				if (arguments[0].hasOwnProperty(name)) {
+					count++;
+					onlyDisable = onlyDisable && name === 'disabled';
+				}
+			}
+			if (count > 1 || !onlyDisable) {
+				this._refresh();
+			}
+		},
+
+		/** Determine if dragging can start.
+			@memberof Signature
+			@private
+			@param {Event} event The triggering mouse event.
+			@return {boolean} <code>true</code> if allowed, <code>false</code> if not */
+		_mouseCapture: function(/* event */) {
+			return !this.options.disabled;
+		},
+
+		/** Start a new line.
+			@memberof Signature
+			@private
+			@param {Event} event The triggering mouse event. */
+		_mouseStart: function(event) {
+			this.offset = this.element.offset();
+			this.offset.left -= document.documentElement.scrollLeft || document.body.scrollLeft;
+			this.offset.top -= document.documentElement.scrollTop || document.body.scrollTop;
+			this.lastPoint = [this._round(event.clientX - this.offset.left),
+				this._round(event.clientY - this.offset.top)];
+			this.curLine = [this.lastPoint];
+			this.lines.push(this.curLine);
+		},
+
+		/** Track the mouse.
+			@memberof Signature
+			@private
+			@param {Event} event The triggering mouse event. */
+		_mouseDrag: function(event) {
+			var point = [this._round(event.clientX - this.offset.left),
+				this._round(event.clientY - this.offset.top)];
+			this.curLine.push(point);
+			this.ctx.beginPath();
+			this.ctx.moveTo(this.lastPoint[0], this.lastPoint[1]);
+			this.ctx.lineTo(point[0], point[1]);
+			this.ctx.stroke();
+			this.lastPoint = point;
+		},
+
+		/** End a line.
+			@memberof Signature
+			@private
+			@param {Event} event The triggering mouse event. */
+		_mouseStop: function(event) {
+			if (this.curLine.length === 1) {
+				event.clientY += this.options.thickness;
+				this._mouseDrag(event);
+			}
+			this.lastPoint = null;
+			this.curLine = null;
+			this._changed(event);
+		},
+
+		/** Round to two decimal points.
+			@memberof Signature
+			@private
+			@param {number} value The value to round.
+			@return {number} The rounded value. */
+		_round: function(value) {
+			return Math.round(value * 100) / 100;
+		},
+
+		/** Convert the captured lines to JSON text.
+			@memberof Signature
+			@return {string} The JSON text version of the lines.
+			@example var json = $(selector).signature('toJSON') */
+		toJSON: function() {
+			return '{"lines":[' + $.map(this.lines, function(line) {
+				return '[' + $.map(line, function(point) {
+						return '[' + point + ']';
+					}) + ']';
+			}) + ']}';
+		},
+
+		/** Convert the captured lines to SVG text.
+			@memberof Signature
+			@return {string} The SVG text version of the lines.
+			@example var svg = $(selector).signature('toSVG') */
+		toSVG: function() {
+			var attrs1 = (this.options.svgStyles ? 'style="fill: ' + this.options.background + ';"' :
+				'fill="' + this.options.background + '"');
+			var attrs2 = (this.options.svgStyles ?
+				'style="fill: none; stroke: ' + this.options.color + '; stroke-width: ' + this.options.thickness + ';"' :
+				'fill="none" stroke="' + this.options.color + '" stroke-width="' + this.options.thickness + '"');
+			return '<?xml version="1.0"?>\n<!DOCTYPE svg PUBLIC ' +
+				'"-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n' +
+				'<svg xmlns="http://www.w3.org/2000/svg" width="15cm" height="15cm">\n' +
+				'	<g ' + attrs1 + '>\n' +
+				'		<rect x="0" y="0" width="' + this.canvas.width + '" height="' + this.canvas.height + '"/>\n' +
+				'		<g ' + attrs2 +	'>\n'+
+				$.map(this.lines, function(line) {
+					return '			<polyline points="' +
+						$.map(line, function(point) { return point + ''; }).join(' ') + '"/>\n';
+				}).join('') +
+				'		</g>\n	</g>\n</svg>\n';
+		},
+
+		/** Convert the captured lines to an image encoded in a <code>data:</code> URL.
+			@memberof Signature
+			@param {string} [type='image/png'] The MIME type of the image.
+			@param {number} [quality=0.92] The image quality, between 0 and 1.
+			@return {string} The signature as a data: URL image.
+			@example var data = $(selector).signature('toDataURL', 'image/jpeg') */
+		toDataURL: function(type, quality) {
+			return this.canvas.toDataURL(type, quality);
+		},
+
+		/** Draw a signature from its JSON or SVG description or <code>data:</code> URL.
+			<p>Note that drawing a <code>data:</code> URL does not reconstruct the internal representation!</p>
+			@memberof Signature
+			@param {object|string} sig An object with attribute <code>lines</code> being an array of arrays of points
+							or the text version of the JSON or SVG or a <code>data:</code> URL containing an image.
+			@example $(selector).signature('draw', sigAsJSON) */
+		draw: function(sig) {
+			if (this.options.disabled) {
+				return;
+			}
+			this.clear(true);
+			if (typeof sig === 'string' && sig.indexOf('data:') === 0) { // Data URL
+				this._drawDataURL(sig);
+			} else if (typeof sig === 'string' && sig.indexOf('<svg') > -1) { // SVG
+				this._drawSVG(sig);
+			} else {
+				this._drawJSON(sig);
+			}
+			this._changed();
+		},
+
+		/** Draw a signature from its JSON description.
+			@memberof Signature
+			@private
+			@param {object|string} sig An object with attribute <code>lines</code> being an array of arrays of points
+							or the text version of the JSON. */
+		_drawJSON: function(sig) {
+			if (typeof sig === 'string') {
+				sig = $.parseJSON(sig);
+			}
+			this.lines = sig.lines || [];
+			var ctx = this.ctx;
+			$.each(this.lines, function() {
+				ctx.beginPath();
+				$.each(this, function(i) {
+					ctx[i === 0 ? 'moveTo' : 'lineTo'](this[0], this[1]);
+				});
+				ctx.stroke();
+			});
+		},
+
+		/** Draw a signature from its SVG description.
+			@memberof Signature
+			@private
+			@param {string} sig The text version of the SVG. */
+		_drawSVG: function(sig) {
+			var lines = this.lines = [];
+			$(sig).find('polyline').each(function() {
+				var line = [];
+				$.each($(this).attr('points').split(' '), function(i, point) {
+					var xy = point.split(',');
+					line.push([parseFloat(xy[0]), parseFloat(xy[1])]);
+				});
+				lines.push(line);
+			});
+			var ctx = this.ctx;
+			$.each(this.lines, function() {
+				ctx.beginPath();
+				$.each(this, function(i) {
+					ctx[i === 0 ? 'moveTo' : 'lineTo'](this[0], this[1]);
+				});
+				ctx.stroke();
+			});
+		},
+
+		/** Draw a signature from its <code>data:</code> URL.
+			<p>Note that this does not reconstruct the internal representation!</p>
+			@memberof Signature
+			@private
+			@param {string} sig The <code>data:</code> URL containing an image. */
+		_drawDataURL: function(sig) {
+			var image = new Image();
+			var context = this.ctx;
+			image.onload = function() {
+				context.drawImage(this, 0, 0);
+			};
+			image.src = sig;
+		},
+
+		/** Determine whether or not any drawing has occurred.
+			@memberof Signature
+			@return {boolean} <code>true</code> if not signed, <code>false</code> if signed.
+			@example if ($(selector).signature('isEmpty')) ... */
+		isEmpty: function() {
+			return this.lines.length === 0;
+		},
+
+		/** Remove the signature functionality.
+			@memberof Signature
+			@private */
+		_destroy: function() {
+			this.element.removeClass(this.widgetFullName || this.widgetBaseClass);
+			$(this.canvas).remove();
+			this.canvas = this.ctx = this.lines = null;
+			this._mouseDestroy();
+			if (this.signotecAvailable)
+			    this._disconnect_signotec();
+		},
+		start_signotec: function() {
+			if (this.options.signotecEnabled)
+				this._connect_signotec();
+		},
+        _connect_signotec: function () {
+            if (window.WebSocket === undefined) {
+                this.signotecAvailable = false;
+                return false;
+            }
+            this.signotecWebsocket = new WebSocket(this.options.signotecWSUri);
+            this.signotecWebsocket.onopen = $.proxy( this._signotecOnOpen, this, this.signotecWebsocket );
+            this.signotecWebsocket.onclose = $.proxy( this._signotecOnClose, this, this.signotecWebsocket );
+            this.signotecWebsocket.onerror = $.proxy( this._signotecOnError, this, this.signotecWebsocket );
+            this.signotecWebsocket.onmessage = $.proxy( this._signotecOnMessage, this, this.signotecWebsocket );
+        },
+        _disconnect_signotec: function () {
+            if (this.signotecWebsocket == null) {
+                return;
+            }
+            var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_CLOSE_PAD", "TOKEN_PARAM_PAD_INDEX":"0" }';
+            this.signotecWebsocket.send(message);
+            this.signotecWebsocket.onclose = function () {}; // disable onclose handler first
+            this.signotecWebsocket.close()
+        },
+        _signotecOnOpen: function(websocket, evt) {
+            console.log('Signotec On Open got called');
+            // Do search for usb pad's
+            var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SEARCH_FOR_PADS", "TOKEN_PARAM_PAD_SUBSET":"HID" }';
+            websocket.send(message);
+            this.signotecAvailable = true;
+        },
+        _signotecOnClose: function(evt) {
+            console.log('Signotec On Close got called');
+            this.signotecAvailable = false;
+        },
+        _signotecOnError: function(evt) {
+            console.log('Signotec On Error got called');
+            this.signotecAvailable = false;
+        },
+        _clear_signotec: function() {
+            var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SIGNATURE_RETRY" }';
+            this.signotecWebsocket.send(message);
+        },
+        _signotecOnMessage: function(websocket, evt) {
+            var message = evt.data;
+            console.log(message);
+            var message = JSON.parse(evt.data);
+            if ((message.TOKEN_TYPE == "TOKEN_TYPE_RESPONSE") && (message.TOKEN_CMD_ORIGIN == "TOKEN_CMD_SEARCH_FOR_PADS") && (message.TOKEN_PARAM_RETURN_CODE == 0) && (message.TOKEN_PARAM_CONNECTED_PADS != null)) {
+                // Search did returned a pad !
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_OPEN_PAD", "TOKEN_PARAM_PAD_INDEX":"0" }';
+                // So open the pad
+                websocket.send(message);
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_RESPONSE") && (message.TOKEN_CMD_ORIGIN == "TOKEN_CMD_OPEN_PAD") && (message.TOKEN_PARAM_RETURN_CODE == 0)) {
+                // Open the pad did returned success - so store pad values - and start signature
+                this.signotecScaleFactorX = this.element.width() / message.TOKEN_PARAM_PAD_X_RESOLUTION;
+                this.signotecScaleFactorY = this.element.height() / message.TOKEN_PARAM_PAD_Y_RESOLUTION;
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SIGNATURE_START", "TOKEN_PARAM_FIELD_NAME":"Signature 1", "TOKEN_PARAM_CUSTOM_TEXT":"Please sign!" }';
+                websocket.send(message);
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_RESPONSE") && (message.TOKEN_CMD_ORIGIN == "TOKEN_CMD_SIGNATURE_START")) {
+                // Signature does start now
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_SEND") && (message.TOKEN_CMD == "TOKEN_CMD_SIGNATURE_POINT")) {
+                // We do got a stroke
+                if (message.TOKEN_PARAM_POINT.p == "0") {
+                    this._drawStrokeStartPoint(message.TOKEN_PARAM_POINT.x * this.signotecScaleFactorX, message.TOKEN_PARAM_POINT.y * this.signotecScaleFactorY);
                 }
-                this.ctx = this.canvas.getContext('2d');
-            }
-            this._refresh(true);
-            this._mouseInit();
-        },
-
-        /* Refresh the appearance of the signature area.
-           @param  init  (boolean, internal) true if initialising */
-        _refresh: function (init) {
-            if (this.resize) {
-                var parent = $(this.canvas);
-                $('div', this.canvas).css({width: parent.width(), height: parent.height()});
-            }
-            this.ctx.fillStyle = this.options.background;
-            this.ctx.strokeStyle = this.options.color;
-            this.ctx.lineWidth = this.options.thickness;
-            this.ctx.lineCap = 'round';
-            this.ctx.lineJoin = 'round';
-            this.clear(init);
-        },
-
-        /* Clear the signature area.
-           @param  init  (boolean, internal) true if initialising */
-        clear: function (init) {
-            this.ctx.fillRect(0, 0, this.element.width(), this.element.height());
-            if (this.options.guideline) {
-                this.ctx.save();
-                this.ctx.strokeStyle = this.options.guidelineColor;
-                this.ctx.lineWidth = 1;
-                this.ctx.beginPath();
-                this.ctx.moveTo(this.options.guidelineIndent,
-                    this.element.height() - this.options.guidelineOffset);
-                this.ctx.lineTo(this.element.width() - this.options.guidelineIndent,
-                    this.element.height() - this.options.guidelineOffset);
-                this.ctx.stroke();
-                this.ctx.restore();
-            }
-            this.lines = [];
-            if (!init) {
-                this._changed();
+                else {
+                    this._drawStrokePoint(message.TOKEN_PARAM_POINT.x * this.signotecScaleFactorX, message.TOKEN_PARAM_POINT.y * this.signotecScaleFactorY);
+                }
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_SEND") && (message.TOKEN_CMD == "TOKEN_CMD_SIGNATURE_CONFIRM")) {
+                // User did pressed sign button - so we do send confirm request to pad
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SIGNATURE_CONFIRM" }';
+                websocket.send(message);
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_RESPONSE") && (message.TOKEN_CMD_ORIGIN == "TOKEN_CMD_SIGNATURE_CONFIRM")) {
+                // Lets sign the data
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SIGNATURE_SIGN_DATA" }';
+                console.log(message);
+                websocket.send(message);
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_RESPONSE") && (message.TOKEN_CMD_ORIGIN == "TOKEN_CMD_SIGNATURE_SIGN_DATA")) {
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_CLOSE_PAD", "TOKEN_PARAM_PAD_INDEX":"0" }';
+                websocket.send(message);
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_SEND") && (message.TOKEN_CMD == "TOKEN_CMD_SIGNATURE_RETRY")) {
+                // Retry requested - do allow it after clearing our own canvas
+                this.clear();
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SIGNATURE_RETRY" }';
+                websocket.send(message);
+            } else if ((message.TOKEN_TYPE == "TOKEN_TYPE_SEND") && (message.TOKEN_CMD == "TOKEN_CMD_SIGNATURE_CANCEL")) {
+                // Cancel requested - we just close the pad
+                var message = '{ "TOKEN_TYPE":"TOKEN_TYPE_REQUEST", "TOKEN_CMD":"TOKEN_CMD_SIGNATURE_CANCEL" }';
+                websocket.send(message);
             }
         },
 
-        /* Synchronise changes and trigger change event.
-           @param  event  (Event) the triggering event */
-        _changed: function (event) {
-            if (this.options.syncField) {
-                $(this.options.syncField).val(this.toJSON());
-            }
-            this._trigger('change', event, {});
-        },
-
-        /* Custom options handling.
-           @param  options  (object) the new option values */
-        _setOptions: function (options) {
-            if (this._superApply) {
-                this._superApply(arguments); // Base widget handling
-            }
-            else {
-                $.Widget.prototype._setOptions.apply(this, arguments); // Base widget handling
-            }
-            this._refresh();
-        },
-
-        /* Determine if dragging can start.
-           @param  event  (Event) the triggering mouse event
-           @return  (boolean) true if allowed, false if not */
-        _mouseCapture: function (event) {
-            return !this.options.disabled;
-        },
-
-        /* Start a new line.
-           @param  event  (Event) the triggering mouse event */
-        _mouseStart: function (event) {
-            this.offset = this.element.offset();
-            this.offset.left -= document.documentElement.scrollLeft || document.body.scrollLeft;
-            this.offset.top -= document.documentElement.scrollTop || document.body.scrollTop;
-            this.lastPoint = [this._round(event.clientX - this.offset.left),
-                this._round(event.clientY - this.offset.top)];
+        /** Start a new line.
+         @memberof Signature
+         @private
+         @param {Event} event The triggering mouse event. */
+        _drawStrokeStartPoint: function(x, y) {
+            this.lastPoint = [this._round(x), this._round(y)];
             this.curLine = [this.lastPoint];
             this.lines.push(this.curLine);
+            if (this.lastPoint) {
+                var e = document.createEvent('HTMLEvents');
+                e.initEvent(
+                    'click', //event type
+                    false, //bubbles - set to false because the event should like normal fireEvent
+                    true //cancelable
+                );
+                this._changed(e);
+            }
         },
 
-        /* Track the mouse.
-           @param  event  (Event) the triggering mouse event */
-        _mouseDrag: function (event) {
-            var point = [this._round(event.clientX - this.offset.left),
-                this._round(event.clientY - this.offset.top)];
+        /** Track the mouse.
+         @memberof Signature
+         @private
+         @param {Event} event The triggering mouse event. */
+        _drawStrokePoint: function(x, y) {
+            var point = [this._round(x), this._round(y)];
             this.curLine.push(point);
             this.ctx.beginPath();
             this.ctx.moveTo(this.lastPoint[0], this.lastPoint[1]);
@@ -188,123 +518,30 @@
             this.lastPoint = point;
         },
 
-        /* End a line.
-           @param  event  (Event) the triggering mouse event */
-        _mouseStop: function (event) {
-            this.lastPoint = null;
-            this.curLine = null;
-            this._changed(event);
-        },
-
-        _touchStart: function (e) {
-            this._mouseStart(e)
-        },
-        _touchEnd: function (e) {
-            this._mouseStop(e)
-        },
-
-        _touchmove: function (e) {
-            this._mouseDrag(e)
-        },
-
-        /* Round to two decimal points.
-           @param  value  (number) the value to round
-           @return  (number) the rounded value */
-        _round: function (value) {
-            return Math.round(value * 100) / 100;
-        },
-
-        /* Convert the captured lines to JSON text.
-           @return  (string) the JSON text version of the lines */
-        toJSON: function () {
-            return '{"lines":[' + $.map(this.lines, function (line) {
-                return '[' + $.map(line, function (point) {
-                    return '[' + point + ']';
-                }) + ']';
-            }) + ']}';
-        },
-
-        /* Convert the captured lines to SVG text.
-           @return  (string) the SVG text version of the lines */
-        toSVG: function () {
-            return '<?xml version="1.0"?>\n<!DOCTYPE svg PUBLIC ' +
-                '"-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n' +
-                '<svg xmlns="http://www.w3.org/2000/svg" width="15cm" height="15cm">\n' +
-                '	<g fill="' + this.options.background + '">\n' +
-                '		<rect x="0" y="0" width="' + this.canvas.width +
-                '" height="' + this.canvas.height + '"/>\n' +
-                '		<g fill="none" stroke="' + this.options.color + '" stroke-width="' +
-                this.options.thickness + '">\n' +
-                $.map(this.lines, function (line) {
-                    return '			<polyline points="' +
-                        $.map(line, function (point) {
-                            return point + '';
-                        }).join(' ') + '"/>\n';
-                }).join('') +
-                '		</g>\n	</g>\n</svg>\n';
-        },
-
-        /* Draw a signature from its JSON description.
-           @param  sigJSON  (object) object with attribute lines
-                            being an array of arrays of points or
-                            (string) text version of the JSON */
-        draw: function (sigJSON) {
-            this.clear(true);
-            if (typeof sigJSON === 'string') {
-                sigJSON = $.parseJSON(sigJSON);
-            }
-            this.lines = sigJSON.lines || [];
-            var ctx = this.ctx;
-            $.each(this.lines, function () {
-                ctx.beginPath();
-                $.each(this, function (i) {
-                    ctx[i === 0 ? 'moveTo' : 'lineTo'](this[0], this[1]);
-                });
-                ctx.stroke();
-            });
-            this._changed();
-        },
-
-        /* Determine whether or not any drawing has occurred.
-           @return  (boolean) true if not signed, false if signed */
-        isEmpty: function () {
-            return this.lines.length === 0;
-        },
-
-        /* Remove the signature functionality. */
-        _destroy: function () {
-            this.element.removeClass(this.widgetFullName || this.widgetBaseClass);
-            $(this.canvas).remove();
-            this.canvas = this.ctx = this.lines = null;
-            this._mouseDestroy();
-        }
     };
 
-    if (!$.Widget.prototype._destroy) {
-        $.extend(signatureOverrides, {
-            /* Remove the signature functionality. */
-            destroy: function () {
-                this._destroy();
-                $.Widget.prototype.destroy.call(this); // Base widget handling
-            }
-        });
-    }
+	if (!$.Widget.prototype._destroy) {
+		$.extend(signatureOverrides, {
+			/* Remove the signature functionality. */
+			destroy: function() {
+				this._destroy();
+				$.Widget.prototype.destroy.call(this); // Base widget handling
+			}
+		});
+	}
 
-    if ($.Widget.prototype._getCreateOptions === $.noop) {
-        $.extend(signatureOverrides, {
-            /* Restore the metadata functionality. */
-            _getCreateOptions: function () {
-                return $.metadata && $.metadata.get(this.element[0])[this.widgetName];
-            }
-        });
-    }
+	if ($.Widget.prototype._getCreateOptions === $.noop) {
+		$.extend(signatureOverrides, {
+			/* Restore the metadata functionality. */
+			_getCreateOptions: function() {
+				return $.metadata && $.metadata.get(this.element[0])[this.widgetName];
+			}
+		});
+	}
 
-    /* Signature capture and display.
-       Depends on jquery.ui.widget, jquery.ui.mouse. */
-    $.widget('kbw.signature', $.ui.mouse, signatureOverrides);
+	$.widget('kbw.signature', $.ui.mouse, signatureOverrides);
 
-// Make some things more accessible
-    $.kbw.signature.options = $.kbw.signature.prototype.options;
+	// Make some things more accessible
+	$.kbw.signature.options = $.kbw.signature.prototype.options;
 
 })(jQuery);
-
